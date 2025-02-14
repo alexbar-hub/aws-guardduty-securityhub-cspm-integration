@@ -1,0 +1,261 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Creates a lambda that archives GuardDuty findings based on severity (default is LOW, <4) and that are older than 1 month."
+
+Parameters:
+  
+  GuardDutyAutoArchiveLambda:
+    Type: String
+    Description: The name of your Lambda function.
+    Default: guardduty-autoarchive
+
+  GuardDutyAutoArchiveEventBridge:
+    Type: String
+    Description: The name of the EventBridge rule that will trigger your Lambda function.
+    Default: guardduty-autoarchive
+
+  GuardDutyAutoArchiveIAMRole:
+    Type: String
+    Description: The name of the IAM role used by your Lambda function.
+    Default: guardduty-autoarchive
+
+  GuardDutyCloudWatchGroupPrefix:
+    Type: String
+    Description: The CloudWatch Log Group prefix for your Lambda function.
+    Default: /aws/lambda
+
+  Region: 
+    Type: String
+    Description: Used as parameter in IAM to avoid duplicates.
+    Default: ap-southeast-2
+
+  MonthsOlder: 
+    Type: String
+    Description: Age of the findings that we want to archive in months.
+    Default: 1
+
+  Severity: 
+    Type: String
+    Description: Maximum severity of the findings that we want to keep active, the ones below this severity level will be archived (default is 4).
+    Default: 4
+
+Resources:
+
+  GuardDutyAutoArchiveLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: 
+        Fn::Join:
+          - ""
+          - 
+            - !Ref GuardDutyCloudWatchGroupPrefix
+            - "/"
+            - !Ref GuardDutyAutoArchiveLambda
+      RetentionInDays: 90
+
+  IAMLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - "" 
+          - 
+            - !Ref GuardDutyAutoArchiveIAMRole
+            - "-"
+            - !Ref Region
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+      - PolicyName: 
+          Fn::Join:
+          - "" 
+          - 
+            - "GuardDutyAutoArchive-CloudWatch"
+            - "-"
+            - !Ref Region
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: 
+              - "logs:List*"
+              - "logs:Describe*"
+              - "logs:Get*"
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: Allow
+            Action: "logs:CreateLogGroup"
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: "Allow"
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              - !Sub 'arn:aws:logs:*:*:log-group:${GuardDutyCloudWatchGroupPrefix}/${GuardDutyAutoArchiveLambda}:*'
+      - PolicyName: 
+          Fn::Join:
+          - "" 
+          - 
+            - "GuardDutyAutoArchive-GuardDuty"
+            - "-"
+            - !Ref Region
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Sid: "VisualEditor0"
+            Effect: "Allow"
+            Action:
+              - "guardduty:List*"
+              - "guardduty:Describe*"
+              - "guardduty:Get*"
+              - guardduty:ArchiveFindings
+            Resource: "*"
+
+  LambdaGuardDutyAutoArchive:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Ref GuardDutyAutoArchiveLambda
+      Description: "AWS function used to archive GuardDuty findings based on severity (default is LOW, <4) and that are older than 1 month."
+      Code:
+        ZipFile:
+          !Sub |
+          import boto3
+          import logging
+          import os
+          import time
+
+          # Initialize logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize GuardDuty client
+          guardduty_client = boto3.client('guardduty')
+
+          def lambda_handler(event, context):
+              try:
+                  # Get the current epoch time in milliseconds
+                  current_epoch_time = int(time.time() * 1000)
+                  
+                  # Log the current epoch time
+                  logger.info(f"Current epoch time (ms): {current_epoch_time}")
+                  
+                  # Get environment variables
+                  months_older = int(os.getenv('MONTHS_OLDER', '2'))
+                  SEVERITY = int(os.getenv('SEVERITY', '4'))  # Default severity is '4' (LOW)
+                  SECONDS_IN_MONTH = 30 * 24 * 60 * 60  
+                  # Calculate threshold timestamp for filtering findings in milliseconds
+                  archive_threshold = current_epoch_time - (months_older * SECONDS_IN_MONTH * 1000)
+
+                  # Log parameters
+                  logger.info(f"[{current_epoch_time}] Archiving GuardDuty findings older than {months_older} months with severity less than {SEVERITY}.")
+
+                  # List all detectors
+                  detectors = guardduty_client.list_detectors()
+                  if not detectors.get('DetectorIds'):
+                      logger.warning(f"[{current_epoch_time}] No GuardDuty detectors found.")
+                      return
+                  
+                  for detector_id in detectors['DetectorIds']:
+                      # Pagination: Fetch findings with severity less than SEVERITY
+                      finding_ids = []
+                      next_token = None
+                      
+                      while True:
+                          # Parameters for the list_findings API call
+                          params = {
+                              "DetectorId": detector_id,
+                              "FindingCriteria": {
+                                  "Criterion": {
+                                      "updatedAt": {
+                                          "Lt": archive_threshold  
+                                      },
+                                      "severity": {
+                                          "Lt": SEVERITY  
+                                      },
+                                      "service.archived": {
+                                          "Eq": ["false"]  
+                                      }
+                                  }
+                              }
+                          }
+                          
+                          # Only include NextToken if it exists
+                          if next_token:
+                              params["NextToken"] = next_token
+                          
+                          # Fetch findings
+                          response = guardduty_client.list_findings(**params)
+                          
+                          # Add the findings to the list
+                          finding_ids.extend(response.get("FindingIds", []))
+                          
+                          # Check if there are more pages of findings
+                          next_token = response.get('NextToken')
+                          
+                          # If no NextToken, stop the loop (no more pages)
+                          if not next_token:
+                              break
+
+                      if not finding_ids:
+                          logger.info(f"[{current_epoch_time}] No findings to archive for detector {detector_id}.")
+                          continue
+
+                      # Log the finding IDs that will be archived
+                      logger.info(f"[{current_epoch_time}] Findings to be archived for detector {detector_id}: {finding_ids}")
+
+                      # Process findings in batches of 50 due to GuardDuty limitations.
+                      batch_size = 50
+                      for i in range(0, len(finding_ids), batch_size):
+                          batch = finding_ids[i:i + batch_size]
+
+                          # Log each batch of findingsthat will be archived
+                          logger.info(f"[{current_epoch_time}] Archiving batch {i // batch_size + 1}: {batch}")
+
+                          # Here we do the archiving of the findings
+                          guardduty_client.archive_findings(DetectorId=detector_id, FindingIds=batch)
+                          logger.info(f"[{current_epoch_time}] Archived {len(batch)} findings in detector {detector_id}.")
+
+              except Exception as e:
+                  logger.error(f"[{current_epoch_time}] Error processing GuardDuty findings: {e}")
+      Handler: "index.lambda_handler"
+      Environment:
+       Variables:
+          MONTHS_OLDER: !Ref MonthsOlder
+          SEVERITY: !Ref Severity
+      MemorySize: 512
+      Role: 
+        Fn::GetAtt:
+        - IAMLambdaRole
+        - Arn
+      Runtime: "python3.13"
+      Timeout: 600
+
+  GuardDutyAutoArchiveRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: !Ref GuardDutyAutoArchiveEventBridge
+      Description: "Triggers lambda function on a schedule to archive GuardDuty findings."
+      EventBusName: default
+      ScheduleExpression: "cron(0 21 ? * * *)"
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+            - LambdaGuardDutyAutoArchive
+            - Arn
+          Id: "GuardDutyAutoArchiveLambdaTarget"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "LambdaGuardDutyAutoArchive"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+        - GuardDutyAutoArchiveRule
+        - Arn

@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Creates a lambda that sets SecurityHub findings to RESOLVED when the source finding in GuardDuty is archived."
+
+Parameters:
+  
+  GuardDutySecurityHubAutocloseLambda:
+    Type: String
+    Description: The name of your Lambda function.
+    Default: guardduty-securityhub-autoclose
+
+  GuardDutySecurityHubAutocloseEventBridge:
+    Type: String
+    Description: The name of the EventBridge rule that will trigger your Lambda function.
+    Default: guardduty-securityhub-autoclose
+
+  GuardDutySecurityHubAutocloseIAMRole:
+    Type: String
+    Description: The name of the IAM role used by your Lambda function.
+    Default: guardduty-securityhub-autoclose
+
+  GuardDutyCloudWatchGroupPrefix:
+    Type: String
+    Description: The CloudWatch Log Group prefix for your Lambda function.
+    Default: /aws/lambda
+
+  Region: 
+    Type: String
+    Description: Used as parameter in IAM to avoid duplicates.
+    Default: ap-southeast-2
+
+Resources:
+
+  MyReportsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: 
+        Fn::Join:
+          - ""
+          - 
+            - !Ref GuardDutyCloudWatchGroupPrefix
+            - "/"
+            - !Ref GuardDutySecurityHubAutocloseLambda
+      RetentionInDays: 90
+
+  IAMLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - "" 
+          - 
+            - !Ref GuardDutySecurityHubAutocloseIAMRole
+            - "-"
+            - !Ref Region
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+      - PolicyName: 
+          Fn::Join:
+          - "" 
+          - 
+            - "GuardDutySecurityHubAutoclose-CloudWatch"
+            - "-"
+            - !Ref Region
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action: 
+              - "logs:List*"
+              - "logs:Describe*"
+              - "logs:Get*"
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: Allow
+            Action: "logs:CreateLogGroup"
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: "Allow"
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource:
+              - !Sub 'arn:aws:logs:*:*:log-group:${GuardDutyCloudWatchGroupPrefix}/${GuardDutySecurityHubAutocloseLambda}:*'
+      - PolicyName: 
+          Fn::Join:
+          - "" 
+          - 
+            - "GuardDutySecurityHubAutoclose-SecurityHub"
+            - "-"
+            - !Ref Region
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+              - "securityhub:Get*"
+              - "securityhub:List*"
+              - "securityhub:Describe*"
+              - "securityhub:BatchUpdateFindings"
+            Resource: "*"
+      - PolicyName: 
+          Fn::Join:
+          - "" 
+          - 
+            - "GuardDutySecurityHubAutoclose-GuardDuty"
+            - "-"
+            - !Ref Region
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Sid: "VisualEditor0"
+            Effect: "Allow"
+            Action:
+              - "guardduty:List*"
+              - "guardduty:Describe*"
+              - "guardduty:Get*"
+            Resource: "*"
+
+  LambdaGuardDutySecurityHubAutoclose:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Ref GuardDutySecurityHubAutocloseLambda
+      Description: "AWS function used to set SecurityHub findings to RESOLVED when the source finding in GuardDuty is archived."
+      Code:
+        ZipFile:
+          !Sub |
+          import boto3
+          import logging
+
+          # Initialize logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # AWS Clients
+          securityhub_client = boto3.client('securityhub')
+          guardduty_client = boto3.client('guardduty')
+
+          def lambda_handler(event, context):
+              # Log the incoming event for debugging
+              logger.info(f"Received event: {event}")
+
+              try:
+                  # Extract event details
+                  detail = event.get('detail', {})
+                  event_name = detail.get('eventName')
+
+                  # Only process ArchiveFindings events
+                  if event_name != 'ArchiveFindings':
+                      logger.info(f"Skipping event: {event_name}, not ArchiveFindings.")
+                      return
+
+                  # Extract detector ID and finding IDs
+                  request_parameters = detail.get('requestParameters', {})
+                  detector_id = request_parameters.get('detectorId')
+                  finding_ids = request_parameters.get('findingIds', [])
+
+                  if not detector_id or not finding_ids:
+                      logger.error("Missing detector ID or finding IDs in the event.")
+                      return
+
+                  # Retrieve full finding details from GuardDuty
+                  finding_details = guardduty_client.get_findings(
+                      DetectorId=detector_id,
+                      FindingIds=finding_ids
+                  )
+
+                  findings_to_update = []
+                  for finding in finding_details.get('Findings', []):
+                      finding_arn = finding['Arn']
+                      account_id = finding['AccountId']
+
+                      # Extract the region from the finding ARN
+                      arn_parts = finding_arn.split(':')
+                      if len(arn_parts) < 4:
+                          logger.error(f"Invalid ARN format: {finding_arn}")
+                          continue
+
+                      region = arn_parts[3]
+                      product_arn = f"arn:aws:securityhub:{region}::product/aws/guardduty"
+
+                      findings_to_update.append({
+                          'Id': finding_arn,  # This is the full ARN of the finding
+                          'ProductArn': product_arn
+                      })
+
+                  # Update findings to RESOLVED in Security Hub
+                  if findings_to_update:
+                      response = securityhub_client.batch_update_findings(
+                          FindingIdentifiers=findings_to_update,
+                          Workflow={'Status': 'RESOLVED'}
+                      )
+                      logger.info(f"Successfully updated findings in Security Hub: {response}")
+                  else:
+                      logger.warning("No findings to update in Security Hub.")
+
+              except guardduty_client.exceptions.InvalidInputException as e:
+                  logger.error(f"Invalid input to GuardDuty: {e}")
+              except securityhub_client.exceptions.InvalidInputException as e:
+                  logger.error(f"Invalid input to Security Hub: {e}")
+              except Exception as e:
+                  logger.error(f"Error processing event: {e}")
+      Handler: "index.lambda_handler"
+      MemorySize: 512
+      Role: 
+        Fn::GetAtt:
+        - IAMLambdaRole
+        - Arn
+      Runtime: "python3.13"
+      Timeout: 600
+
+  GuardDutySecurityHubAutocloseRule:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Name: !Ref GuardDutySecurityHubAutocloseEventBridge
+      Description: "Triggers lambda function when a finding in GuardDuty is archived to set to RESOLVED the corresponding finding in SecurityHub."
+      EventBusName: default
+      State: "ENABLED"
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - guardduty.amazonaws.com
+          eventName: 
+            - ArchiveFindings
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+            - LambdaGuardDutySecurityHubAutoclose
+            - Arn
+          Id: "GuardDutySecurityHubAutocloseLambdaTarget"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "LambdaGuardDutySecurityHubAutoclose"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+        - GuardDutySecurityHubAutocloseRule
+        - Arn

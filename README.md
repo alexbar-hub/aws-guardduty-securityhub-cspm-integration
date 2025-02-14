@@ -42,7 +42,7 @@ The design is as it follows:
 
 ![GuardDuty-SecurityHub Integration Design](images/GuardDuty-SecurityHub-Integration.drawio.png)
 
-[Source](images/GuardDuty-SecurityHub-Integration.drawio)
+[Source](files/images/GuardDuty-SecurityHub-Integration.drawio)
 
 ## Usage
 Deploy the templates via CloudFormation StackSets in the following order.

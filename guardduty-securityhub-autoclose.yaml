@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Creates a lambda that sets SecurityHub findings to RESOLVED when the source finding in GuardDuty is archived."
+Description: "Creates a lambda that sets SecurityHub CSPM findings to RESOLVED when the source finding in GuardDuty is archived."
 
 Parameters:
   

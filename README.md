@@ -30,10 +30,10 @@ Assumptions:
 
 The design is as it follows:
 
-![GuardDuty-SecurityHub Integration Design](images/GuardDuty-SecurityHubCSPM-Integration.drawio.png)
-*Figure 1:GuardDuty-SecurityHubCSPM Integration Design*
+![GuardDuty-SecurityHub CSPM Integration Design](images/guardduty-securityhub-cspm-integration.drawio.png)
+*Figure 1: GuardDuty-SecurityHubCSPM Integration Design*
 
-[Design Source - draw.io](https://github.com/alexbar-hub/aws-guardduty-securityhubcspm-integration/blob/main/images/GuardDuty-SecurityHubCSPM-Integration.drawio)
+[Design Source - draw.io](https://github.com/alexbar-hub/aws-guardduty-securityhub-cspm-integration/blob/main/images/guardduty-securityhub-cspm-integration.drawio)
 
 ## Deployment and Customization
 Deploy the templates via CloudFormation StackSets in the following order.

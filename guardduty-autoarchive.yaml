@@ -122,8 +122,7 @@ Resources:
       FunctionName: !Ref GuardDutyAutoArchiveLambda
       Description: "AWS function used to archive GuardDuty findings based on severity (default is LOW, <4) and that are older than 1 month."
       Code:
-        ZipFile:
-          !Sub |
+        ZipFile: |
           import boto3
           import logging
           import os

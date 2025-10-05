@@ -128,8 +128,7 @@ Resources:
       FunctionName: !Ref GuardDutySecurityHubAutocloseLambda
       Description: "AWS function used to set SecurityHub findings to RESOLVED when the source finding in GuardDuty is archived."
       Code:
-        ZipFile:
-          !Sub |
+        ZipFile: | 
           import boto3
           import logging
 
